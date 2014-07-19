@@ -1,4 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
+#define WINVER 0x0500
+#define _WIN32_WINNT 0x0500
+
 #include <SDKDDKVer.h>
 #include <windows.h>
 #include <stdio.h>
@@ -6,7 +9,7 @@
 
 #define debug(a, b) printf("%d:%d %s\n", __LINE__, a, b)
 
-BOOL                    isService, install, remove;
+BOOL                    isService, installSvc, removeSvc;
 HANDLE                  IOPort;
 SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
