@@ -1,13 +1,16 @@
 #define WIN32_LEAN_AND_MEAN
+#include <SDKDDKVer.h>
 #include <windows.h>
 #include <stdio.h>
+#include <Shlwapi.h>
 
 #define debug(a, b) printf("%d:%d %s\n", __LINE__, a, b)
 
-BOOL                    isService;
+BOOL                    isService, install;
 HANDLE                  IOPort;
 SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
+LPWSTR                   CommandLine;
 
 VOID ReportStatus(DWORD status)
 {
@@ -39,7 +42,7 @@ VOID WINAPI SvcCtrlHandler(DWORD dwCtrl)
     }
 }
 
-VOID ServiceSetup(DWORD argc, LPTSTR *argv)
+VOID ServiceSetup(DWORD argc, LPCSTR *argv)
 {
     if(!isService)
         return;
@@ -47,7 +50,7 @@ VOID ServiceSetup(DWORD argc, LPTSTR *argv)
     ReportStatus(SERVICE_START_PENDING);
 }
 
-VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
+VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
 {
     BOOL ret;
     DWORD key, value;
@@ -55,7 +58,7 @@ VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
     HANDLE Job = INVALID_HANDLE_VALUE;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limitInfo = {0};
     JOBOBJECT_ASSOCIATE_COMPLETION_PORT portInfo = {0};
-    STARTUPINFO startup = {0};
+    STARTUPINFOW startup = {0};
     PROCESS_INFORMATION procinfo = {0};
 
     ServiceSetup(argc, argv);
@@ -78,10 +81,9 @@ VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
     }
 
 restart:    
-
-    ret = CreateProcess(
+    ret = CreateProcessW(
         NULL,       //lpApplicationName
-        TEXT("C:\\Windows\\notepad.exe"),   //lpCommandLine
+        CommandLine,//lpCommandLine
         NULL,       //lpProcessAttributes
         NULL,       //lpThreadAttributes
         FALSE,      //bInheritHandles
@@ -127,20 +129,84 @@ error:
     CloseHandle(Job);
 }
 
-int wmain(int argc, wchar_t *argv[])
+wchar_t help_text[] = \
+L"\tsrvany.exe [command line]\n" \
+L"\t    Run command, restart on exit\n\n" \
+L"\tsrvany.exe install service_name /arg [command line]\n" \
+L"\t    Install command as a service\n\n" \
+L"\tsrvany.exe remove service_name\n" \
+L"\t    Remove service\n\n" \
+L"\tsrvany.exe service [command line]\n" \
+L"\t    Used \n\n" \
+L"";
+
+static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
 {
-    SERVICE_TABLE_ENTRY DispatchTable[] =
+    int bcount = 0, qcount = 0;
+    LPCWSTR in = *pos;
+    BOOL cmd = FALSE;
+
+    while (*in)
     {
+        if((*in == ' ' || *in == '\t') && qcount == 0) {
+            *out = 0;
+            *in++;
+            if(cmd) {
+                /* skip to begining of next argument */
+                while((*in == ' ' || *in == '\t'))
+                    in++;
+                break;
+            }
+        } else if(*in == '"') {
+            qcount++;
+            qcount &= 1;
+            in++;
+        } else {
+            /* append character */
+            *out++ = *in++;
+            cmd = TRUE;
+        }
+    }
+    *pos = in;
+    if(!cmd)
+        SetLastError(ERROR_NO_MORE_ITEMS);
+    return cmd;
+}
+
+
+int wmain(int argc, WCHAR *argv[])
+{
+    SERVICE_TABLE_ENTRY DispatchTable[] = {
         { TEXT(""), (LPSERVICE_MAIN_FUNCTION) ServiceMain },
         { NULL, NULL }
     };
+    LPWSTR commandLine = GetCommandLineW();
+    LPWSTR temp;
+    WCHAR out[2048] = {0};
 
-    isService = TRUE;
+    cmdtok(&commandLine, out, 2048); /* skip executable name */
+    temp = commandLine;
+    if(!cmdtok(&commandLine, out, 2048)) {
+        wprintf(L"%s\n", help_text);
+        return;
+    }
+
+    if(       StrCmpIW(out, L"service") == 0) {
+        isService = TRUE;
+    } else if(StrCmpIW(out, L"install") == 0) {
+        //install = TRUE;
+        debug(0, "Not implemented");
+        return;
+    } else {
+        commandLine = temp;
+    }
 
     if (!(IOPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1))) {
         debug(GetLastError(), "CreateIoCompletionPort failed");
         return;
     }
+
+    CommandLine = commandLine;
 
     Status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 
