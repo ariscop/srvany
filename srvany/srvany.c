@@ -56,7 +56,7 @@ VOID ServiceSetup(DWORD argc, LPCSTR *argv)
 VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
 {
     BOOL ret;
-    DWORD key, value;
+    DWORD key, value, code;
     LPOVERLAPPED overlapped;
     HANDLE Job = INVALID_HANDLE_VALUE;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limitInfo = {0};
@@ -66,6 +66,7 @@ VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
 
     ServiceSetup(argc, argv);
 
+restart:
     if(!(Job = CreateJobObject(NULL, NULL))) {
         debug(GetLastError(), "CreateJobObject failed");
         goto error;
@@ -83,7 +84,6 @@ VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
         goto error;
     }
 
-restart:    
     ret = CreateProcessW(
         NULL,       //lpApplicationName
         CommandLine,//lpCommandLine
@@ -108,18 +108,23 @@ restart:
         goto error;
     }
     ResumeThread(procinfo.hThread);
-    CloseHandle(procinfo.hProcess);
     CloseHandle(procinfo.hThread);
     ReportStatus(SERVICE_RUNNING);
     while(GetQueuedCompletionStatus(IOPort, &value, &key, &overlapped, INFINITE)) {
         if(key == 1) {
             if(value == SERVICE_CONTROL_STOP)
                 break;
-        } else
+        } else if (key == (DWORD)Job)
             switch(value)
         {
-        case JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO:
-            debug(0, "JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, restarting");
+        case JOB_OBJECT_MSG_EXIT_PROCESS:
+            if((DWORD)overlapped != procinfo.dwProcessId)
+                continue;
+            if(!GetExitCodeProcess(procinfo.hProcess, &code))
+                debug(GetLastError(), "GetExitCodeProcess failed");
+            debug(code, "Main process exited, restarting");
+            CloseHandle(procinfo.hProcess);
+            CloseHandle(Job);
             goto restart;
         default:
             break;
