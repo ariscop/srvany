@@ -5,9 +5,18 @@
 #include <SDKDDKVer.h>
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <Shlwapi.h>
 
-#define debug(a, b) printf("%d:%d %s\n", __LINE__, a, b)
+#define debug(a) _debugprint(__LINE__, a)
+
+void _debugprint(int line, LPWSTR message)
+{
+    WCHAR buf[256];
+    DWORD lastError = GetLastError();
+    FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, lastError, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, 256, NULL);
+    wprintf(L"%d:%d %s: %s\n", line, lastError, message, buf);
+}
 
 BOOL                    isService, installSvc, removeSvc;
 HANDLE                  IOPort;
@@ -68,19 +77,19 @@ VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
 
 restart:
     if(!(Job = CreateJobObject(NULL, NULL))) {
-        debug(GetLastError(), "CreateJobObject failed");
+        debug(L"CreateJobObject failed");
         goto error;
     }
 
     limitInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if(!SetInformationJobObject(Job, JobObjectExtendedLimitInformation, &limitInfo, sizeof(limitInfo))) {
-        debug(GetLastError(), "JobObjectExtendedLimitInformation failed");
+        debug(L"JobObjectExtendedLimitInformation failed");
         goto error;
     }
     portInfo.CompletionKey = Job;
     portInfo.CompletionPort = IOPort;
     if(!SetInformationJobObject(Job, JobObjectAssociateCompletionPortInformation, &portInfo, sizeof(portInfo))) {
-        debug(GetLastError(), "JobObjectAssociateCompletionPortInformation failed");
+        debug(L"JobObjectAssociateCompletionPortInformation failed");
         goto error;
     }
 
@@ -97,11 +106,11 @@ restart:
         &procinfo   //lpProcessInformation
     );
     if(!ret) {
-        debug(GetLastError(), "CreateProcess Failed");
+        debug(L"CreateProcess Failed");
         goto error;
     }
     if(!AssignProcessToJobObject(Job, procinfo.hProcess)) {
-        debug(GetLastError(), "AssignProcessToJobObject Failed (service in job?)");
+        debug(L"AssignProcessToJobObject Failed (service in job?)");
         TerminateProcess(procinfo.hProcess, 0);
         CloseHandle(procinfo.hProcess);
         CloseHandle(procinfo.hThread);
@@ -121,8 +130,8 @@ restart:
             if((DWORD)overlapped != procinfo.dwProcessId)
                 continue;
             if(!GetExitCodeProcess(procinfo.hProcess, &code))
-                debug(GetLastError(), "GetExitCodeProcess failed");
-            debug(code, "Main process exited, restarting");
+                debug(L"GetExitCodeProcess failed");
+            debug(L"Main process exited, restarting");
             CloseHandle(procinfo.hProcess);
             CloseHandle(Job);
             goto restart;
@@ -130,7 +139,7 @@ restart:
             break;
         }
     }
-    debug(0, "stop requested");
+    debug(L"stop requested");
 error:
     ReportStatus(SERVICE_STOPPED);
     CloseHandle(IOPort);
@@ -139,11 +148,14 @@ error:
 
 wchar_t help_text[] = \
 L"\tsrvany.exe [command line]\n" \
+L"\tsrvany.exe run [command line]\n" \
 L"\t    Run command, restart on exit\n\n" \
 L"\tsrvany.exe install service_name /arg [command line]\n" \
 L"\t    Install command as a service\n\n" \
 L"\tsrvany.exe remove service_name\n" \
 L"\t    Remove service\n\n" \
+L"\tsrvany.exe list\n" \
+L"\t    list installed srvany services\n\n" \
 L"\tsrvany.exe service\n" \
 L"\t    Internal, do not use\n\n" \
 L"";
@@ -157,7 +169,6 @@ static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
     while (*in)
     {
         if((*in == ' ' || *in == '\t') && qcount == 0) {
-            *out = 0;
             *in++;
             if(cmd) {
                 /* skip to begining of next argument */
@@ -175,6 +186,7 @@ static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
             cmd = TRUE;
         }
     }
+    *out = 0;
     *pos = in;
     if(!cmd)
         SetLastError(ERROR_NO_MORE_ITEMS);
@@ -187,6 +199,101 @@ BOOL isTerminal(void) {
     return GetConsoleProcessList(&pid, 1) != 1;
 }
 
+HKEY getServicesKey(DWORD access)
+{
+    static HKEY services;
+    static DWORD _access;
+    DWORD status;
+    if(!services && (_access & access) != access)
+    {
+        _access |= access;
+        status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\services", 0, _access, &services);
+        if(status) {
+            SetLastError(status);
+            services = NULL;
+        }
+    }
+    return services;
+}
+
+HKEY getParamKey(LPWSTR service, DWORD access)
+{
+    HKEY hkservices, hkservice, hkparams;
+    DWORD status;
+    hkservices = getServicesKey(access);
+    if(!hkservices)
+        goto error;
+    if(status = RegOpenKeyExW(hkservices, service, 0, access, &hkservice))
+        goto error;
+    if(access & KEY_CREATE_SUB_KEY)
+        status = RegCreateKeyExW(hkservice, L"Parameters", 0, 0, 0, access, 0, &hkparams, NULL);
+    else
+        status = RegOpenKeyExW(hkservice, L"Parameters", 0, access, &hkparams);
+    if(status)
+        goto error;
+
+    RegCloseKey(hkservice);
+    return hkparams;
+
+error:
+    SetLastError(status);
+    RegCloseKey(hkservice);
+    return NULL;
+}
+
+BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD size)
+{
+    HKEY params = getParamKey(service, KEY_READ);
+    DWORD _type, status;
+    if(!params)
+        return FALSE;
+    status = RegQueryValueExW(params, param, NULL, &_type, out, size);
+    SetLastError(status);
+    if(status || _type != type) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void listService(void)
+{
+    SC_HANDLE Manager = NULL;
+    BYTE buffer[256*1024];
+    DWORD serviceCount, bytesNeeded, i;
+    Manager = OpenSCManager(NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE);
+    if(!Manager)
+        goto error;
+  
+    if(!EnumServicesStatusW(Manager,
+                            SERVICE_WIN32_OWN_PROCESS,
+                            SERVICE_STATE_ALL,
+                            (LPENUM_SERVICE_STATUSW)buffer,
+                            256*1024,
+                            &bytesNeeded,
+                            &serviceCount,
+                            NULL))
+    {
+        goto error;
+    }
+
+    for(i = 0; i < serviceCount; i++)
+    {
+        DWORD cmdSize = 32*1024;
+        WCHAR cmd[32*1024];
+        LPENUM_SERVICE_STATUSW service = &((LPENUM_SERVICE_STATUSW)buffer)[i];
+
+        if(readParam(service->lpServiceName, L"Application", REG_SZ, (LPBYTE)cmd, &cmdSize))
+            wprintf(L"%s - %.*s\n", service->lpServiceName, cmdSize, cmd);
+    }
+    goto done;
+
+error:
+    debug(L"Failed to enumerate services");
+done:
+    CloseServiceHandle(Manager);
+    return;
+};
+
 int wmain(int argc, WCHAR *argv[])
 {
     SERVICE_TABLE_ENTRY DispatchTable[] = {
@@ -195,7 +302,11 @@ int wmain(int argc, WCHAR *argv[])
     };
     LPWSTR commandLine = GetCommandLineW();
     LPWSTR temp;
-    WCHAR out[2048] = {0};
+    LPWSTR out = (LPWSTR)LocalAlloc(0, sizeof(WCHAR)*2048);
+    if(!out) {
+        debug(L"Failed to allocate memory");
+        return;
+    }
 
     /* Hide terminal when launched from explorer */
     if(!isTerminal())
@@ -208,20 +319,25 @@ int wmain(int argc, WCHAR *argv[])
         return;
     }
 
-    if(       StrCmpIW(out, L"service") == 0) {
+    if(StrCmpIW(out, L"service") == 0) {
         isService = TRUE;
     } else if(StrCmpIW(out, L"install") == 0) {
-        debug(0, "Not implemented");
+        wprintf(L"Install Not implemented\n");
         return;
     } else if(StrCmpIW(out, L"remove") == 0) {
-        debug(0, "Not implemented");
+        wprintf(L"Remove Not implemented");
         return;
+    } else if(StrCmpIW(out, L"list") == 0) {
+        listService();
+        return;
+    } else if(StrCmpIW(out, L"run") == 0) {
+        commandLine = out;
     } else {
         commandLine = temp;
     }
 
     if (!(IOPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1))) {
-        debug(GetLastError(), "CreateIoCompletionPort failed");
+        debug(L"CreateIoCompletionPort failed");
         return;
     }
 
