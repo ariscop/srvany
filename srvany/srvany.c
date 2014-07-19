@@ -27,6 +27,8 @@ SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
 LPWSTR                  CommandLine;
 
+BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD size);
+
 VOID ReportStatus(DWORD status)
 {
     static DWORD checkPoint = 0;
@@ -57,7 +59,7 @@ VOID WINAPI SvcCtrlHandler(DWORD dwCtrl)
     }
 }
 
-VOID ServiceSetup(DWORD argc, LPCSTR *argv)
+VOID ServiceSetup(DWORD argc, LPWSTR *argv)
 {
     if(!isService)
         return;
@@ -65,7 +67,7 @@ VOID ServiceSetup(DWORD argc, LPCSTR *argv)
     ReportStatus(SERVICE_START_PENDING);
 }
 
-VOID WINAPI ServiceMain(DWORD argc, LPCSTR *argv)
+VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv)
 {
     BOOL ret;
     DWORD key, value, code;
@@ -82,6 +84,14 @@ restart:
     if(!(Job = CreateJobObject(NULL, NULL))) {
         debug(L"CreateJobObject failed");
         goto error;
+    }
+
+    if(isService) {
+        DWORD size = 32*1024*sizeof(WCHAR);
+        if(!(CommandLine = LocalAlloc(0, size)))
+            goto error;
+        if(!readParam(argv[0], L"Application", REG_SZ, (LPBYTE)CommandLine, &size))
+            goto error;
     }
 
     limitInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -159,8 +169,6 @@ L"\tsrvany.exe remove service_name\n" \
 L"\t    Remove service\n\n" \
 L"\tsrvany.exe list\n" \
 L"\t    list installed srvany services\n\n" \
-L"\tsrvany.exe service\n" \
-L"\t    Internal, do not use\n\n" \
 L"";
 
 static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
@@ -284,7 +292,7 @@ void installService(LPWSTR name, LPWSTR command)
     GetModuleFileNameW(NULL, self, MAX_PATH);
     wcsncat(out, L"\"", MAX_PATH);
     wcsncat(out, self, MAX_PATH);
-    wcsncat(out, L"\" service", MAX_PATH);
+    wcsncat(out, L"\"", MAX_PATH);
 
     service = CreateServiceW(
         Manager,
@@ -353,8 +361,8 @@ done:
 
 int wmain(int argc, WCHAR *argv[])
 {
-    SERVICE_TABLE_ENTRY DispatchTable[] = {
-        { TEXT(""), (LPSERVICE_MAIN_FUNCTION) ServiceMain },
+    SERVICE_TABLE_ENTRYW DispatchTable[] = {
+        { L"", (LPSERVICE_MAIN_FUNCTIONW) ServiceMain },
         { NULL, NULL }
     };
     LPWSTR commandLine = GetCommandLineW();
@@ -373,12 +381,11 @@ int wmain(int argc, WCHAR *argv[])
     temp = commandLine;
     if(!cmdtok(&commandLine, out, 2048)) {
         wprintf(L"%s\n", help_text);
-        return;
+        isService = TRUE;
+        goto startService;
     }
 
-    if(StrCmpIW(out, L"service") == 0) {
-        isService = TRUE;
-    } else if(StrCmpIW(out, L"install") == 0) {
+    if(StrCmpIW(out, L"install") == 0) {
         WCHAR name[256];
         cmdtok(&commandLine, name, 256);
         installService(name, commandLine);
@@ -395,17 +402,19 @@ int wmain(int argc, WCHAR *argv[])
         commandLine = temp;
     }
 
+    CommandLine = commandLine;
+
+startService:
+
     if (!(IOPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1))) {
         debug(L"CreateIoCompletionPort failed");
         return;
     }
 
-    CommandLine = commandLine;
-
     Status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 
     if(isService)
-        StartServiceCtrlDispatcher(DispatchTable);
+        StartServiceCtrlDispatcherW(DispatchTable);
     else
         ServiceMain(0, NULL);
 }
