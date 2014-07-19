@@ -136,8 +136,8 @@ L"\tsrvany.exe install service_name /arg [command line]\n" \
 L"\t    Install command as a service\n\n" \
 L"\tsrvany.exe remove service_name\n" \
 L"\t    Remove service\n\n" \
-L"\tsrvany.exe service [command line]\n" \
-L"\t    Used \n\n" \
+L"\tsrvany.exe service\n" \
+L"\t    Internal, do not use\n\n" \
 L"";
 
 static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
