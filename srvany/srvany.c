@@ -2,6 +2,9 @@
 #define WINVER 0x0501
 #define _WIN32_WINNT 0x0501
 
+/* silence wcsncat warnings*/
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <SDKDDKVer.h>
 #include <windows.h>
 #include <stdio.h>
@@ -243,8 +246,8 @@ error:
 
 BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD size)
 {
-    HKEY params = getParamKey(service, KEY_READ);
     DWORD _type, status;
+    HKEY params = getParamKey(service, KEY_READ);
     if(!params)
         return FALSE;
     status = RegQueryValueExW(params, param, NULL, &_type, out, size);
@@ -253,6 +256,60 @@ BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD siz
         return FALSE;
     }
     return TRUE;
+}
+
+BOOL writeParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE value, DWORD size)
+{
+    DWORD status;
+    HKEY params = getParamKey(service, KEY_WRITE);
+    if(!params)
+        return FALSE;
+    status = RegSetValueExW(params, param, 0, type, value, size);
+    SetLastError(status);
+    return status == ERROR_SUCCESS;
+}
+
+void installService(LPWSTR name, LPWSTR command)
+{
+    SC_HANDLE Manager, service;
+    WCHAR self[MAX_PATH] = {0};
+    WCHAR out[MAX_PATH] = {0};
+    WCHAR quote[2] = L"\"";
+    /* ensure we can write the param key */
+    if(!getServicesKey(KEY_WRITE))
+        goto error;
+    if(!(Manager = OpenSCManager(NULL, NULL, SC_MANAGER_CREATE_SERVICE)))
+        goto error;
+
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    wcsncat(out, L"\"", MAX_PATH);
+    wcsncat(out, self, MAX_PATH);
+    wcsncat(out, L"\" service", MAX_PATH);
+
+    service = CreateServiceW(
+        Manager,
+        name,
+        name,
+        0,
+        SERVICE_WIN32_OWN_PROCESS,
+        SERVICE_AUTO_START,
+        SERVICE_ERROR_NORMAL,
+        out,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+    );
+    if(!service)
+        goto error;
+    writeParam(name, L"Application", REG_SZ, (LPBYTE)command, wcslen(command)*sizeof(WCHAR));
+    wprintf(L"Service installed successfully\n");
+    return;
+
+error:
+    debug(L"Failed to install service");
+    CloseServiceHandle(Manager);
 }
 
 void listService(void)
@@ -322,7 +379,9 @@ int wmain(int argc, WCHAR *argv[])
     if(StrCmpIW(out, L"service") == 0) {
         isService = TRUE;
     } else if(StrCmpIW(out, L"install") == 0) {
-        wprintf(L"Install Not implemented\n");
+        WCHAR name[256];
+        cmdtok(&commandLine, name, 256);
+        installService(name, commandLine);
         return;
     } else if(StrCmpIW(out, L"remove") == 0) {
         wprintf(L"Remove Not implemented");
