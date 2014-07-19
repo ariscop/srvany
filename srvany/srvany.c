@@ -11,14 +11,14 @@
 #include <stdlib.h>
 #include <Shlwapi.h>
 
-#define debug(a) _debugprint(__LINE__, a)
+#define debug(a) _debugprint(a)
 
-void _debugprint(int line, LPWSTR message)
+void _debugprint(LPWSTR message)
 {
     WCHAR buf[256];
     DWORD lastError = GetLastError();
     FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, lastError, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, 256, NULL);
-    wprintf(L"%d:%d %s: %s\n", line, lastError, message, buf);
+    wprintf(L"%s: %d - %s", message, lastError, buf);
 }
 
 BOOL                    isService, installSvc, removeSvc;
@@ -26,6 +26,8 @@ HANDLE                  IOPort;
 SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
 LPWSTR                  CommandLine;
+
+#define cmdMax (32*1024)
 
 BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD size);
 
@@ -87,7 +89,7 @@ restart:
     }
 
     if(isService) {
-        DWORD size = 32*1024*sizeof(WCHAR);
+        DWORD size = cmdMax*sizeof(WCHAR);
         if(!(CommandLine = LocalAlloc(0, size)))
             goto error;
         if(!readParam(argv[0], L"Application", REG_SZ, (LPBYTE)CommandLine, &size))
@@ -343,8 +345,8 @@ void listService(void)
 
     for(i = 0; i < serviceCount; i++)
     {
-        DWORD cmdSize = 32*1024;
-        WCHAR cmd[32*1024];
+        DWORD cmdSize = cmdMax;
+        WCHAR cmd[cmdMax];
         LPENUM_SERVICE_STATUSW service = &((LPENUM_SERVICE_STATUSW)buffer)[i];
 
         if(readParam(service->lpServiceName, L"Application", REG_SZ, (LPBYTE)cmd, &cmdSize))
@@ -358,6 +360,30 @@ done:
     CloseServiceHandle(Manager);
     return;
 };
+
+void removeService(LPWSTR name)
+{
+    SC_HANDLE Manager, service = NULL;
+    BYTE buf[cmdMax*sizeof(WCHAR)];
+    DWORD size = cmdMax*sizeof(WCHAR), status;
+    if(!(Manager = OpenSCManager(NULL, NULL, 0)))
+        goto error;
+    if(!readParam(name, L"Application", REG_SZ, buf, &size)) {
+        debug(L"Not an srvany service");
+        goto done;
+    }
+    if(!(service = OpenService(Manager, name, DELETE)))
+        goto error;
+    if(DeleteService(service)) {
+        wprintf(L"Service removed successfully\n");
+        goto done;
+    }
+error:
+    debug(L"Failed to delete service");
+done:
+    CloseServiceHandle(service);
+    CloseServiceHandle(Manager);
+}
 
 int wmain(int argc, WCHAR *argv[])
 {
@@ -391,7 +417,9 @@ int wmain(int argc, WCHAR *argv[])
         installService(name, commandLine);
         return;
     } else if(StrCmpIW(out, L"remove") == 0) {
-        wprintf(L"Remove Not implemented");
+        WCHAR name[256];
+        cmdtok(&commandLine, name, 256);
+        removeService(name);
         return;
     } else if(StrCmpIW(out, L"list") == 0) {
         listService();
