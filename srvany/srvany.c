@@ -1,6 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
-#define WINVER 0x0500
-#define _WIN32_WINNT 0x0500
+#define WINVER 0x0501
+#define _WIN32_WINNT 0x0501
 
 #include <SDKDDKVer.h>
 #include <windows.h>
@@ -181,6 +181,11 @@ static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
     return cmd;
 }
 
+/* Detect if we're launched outside of cmd by checking for other processes on our console */
+BOOL isTerminal(void) {
+    DWORD pid;
+    return GetConsoleProcessList(&pid, 1) != 1;
+}
 
 int wmain(int argc, WCHAR *argv[])
 {
@@ -191,6 +196,10 @@ int wmain(int argc, WCHAR *argv[])
     LPWSTR commandLine = GetCommandLineW();
     LPWSTR temp;
     WCHAR out[2048] = {0};
+
+    /* Hide terminal when launched from explorer */
+    if(!isTerminal())
+        FreeConsole();
 
     cmdtok(&commandLine, out, 2048); /* skip executable name */
     temp = commandLine;
