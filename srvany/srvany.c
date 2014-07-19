@@ -6,11 +6,11 @@
 
 #define debug(a, b) printf("%d:%d %s\n", __LINE__, a, b)
 
-BOOL                    isService, install;
+BOOL                    isService, install, remove;
 HANDLE                  IOPort;
 SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
-LPWSTR                   CommandLine;
+LPWSTR                  CommandLine;
 
 VOID ReportStatus(DWORD status)
 {
@@ -194,7 +194,9 @@ int wmain(int argc, WCHAR *argv[])
     if(       StrCmpIW(out, L"service") == 0) {
         isService = TRUE;
     } else if(StrCmpIW(out, L"install") == 0) {
-        //install = TRUE;
+        debug(0, "Not implemented");
+        return;
+    } else if(StrCmpIW(out, L"remove") == 0) {
         debug(0, "Not implemented");
         return;
     } else {
