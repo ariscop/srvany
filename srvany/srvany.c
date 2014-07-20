@@ -21,17 +21,18 @@ void _debugprint(LPWSTR message)
     wprintf(L"%s: %d - %s", message, lastError, buf);
 }
 
-BOOL                    isService, installSvc, removeSvc;
+#define cmdMax (32*1024)
+
+BOOL                    isService;
+DWORD                   restartOnExit;
 HANDLE                  IOPort;
 SERVICE_STATUS          Status;
 SERVICE_STATUS_HANDLE   StatusHandle;
-LPWSTR                  CommandLine;
-
-#define cmdMax (32*1024)
+WCHAR                   CommandLine[cmdMax];
 
 BOOL readParam(LPWSTR service, LPWSTR param, DWORD type, LPBYTE out, LPDWORD size);
 
-VOID ReportStatus(DWORD status)
+VOID ReportStatus(DWORD status, DWORD code)
 {
     static DWORD checkPoint = 0;
     if(!isService)
@@ -47,6 +48,7 @@ VOID ReportStatus(DWORD status)
         checkPoint = 0;
     Status.dwCheckPoint = checkPoint++;
 
+    Status.dwWin32ExitCode = code;
     SetServiceStatus(StatusHandle, &Status);
 }
 
@@ -55,7 +57,7 @@ VOID WINAPI SvcCtrlHandler(DWORD dwCtrl)
     switch(dwCtrl)
     {
     case SERVICE_CONTROL_STOP:
-        ReportStatus(SERVICE_STOP_PENDING);
+        ReportStatus(SERVICE_STOP_PENDING, ERROR_SUCCESS);
     default:
         PostQueuedCompletionStatus(IOPort, dwCtrl, 0x1, NULL);
     }
@@ -65,8 +67,8 @@ VOID ServiceSetup(DWORD argc, LPWSTR *argv)
 {
     if(!isService)
         return;
-    StatusHandle = RegisterServiceCtrlHandler(argv[0], SvcCtrlHandler);
-    ReportStatus(SERVICE_START_PENDING);
+    StatusHandle = RegisterServiceCtrlHandlerW(argv[0], SvcCtrlHandler);
+    ReportStatus(SERVICE_START_PENDING, ERROR_SUCCESS);
 }
 
 VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv)
@@ -90,10 +92,11 @@ restart:
 
     if(isService) {
         DWORD size = cmdMax*sizeof(WCHAR);
-        if(!(CommandLine = LocalAlloc(0, size)))
-            goto error;
         if(!readParam(argv[0], L"Application", REG_SZ, (LPBYTE)CommandLine, &size))
             goto error;
+        size = sizeof(restartOnExit);
+        if(!readParam(argv[0], L"RestartOnExit", REG_DWORD, (LPBYTE)&restartOnExit, &size))
+            restartOnExit = 0;
     }
 
     limitInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -133,7 +136,7 @@ restart:
     }
     ResumeThread(procinfo.hThread);
     CloseHandle(procinfo.hThread);
-    ReportStatus(SERVICE_RUNNING);
+    ReportStatus(SERVICE_RUNNING, ERROR_SUCCESS);
     while(GetQueuedCompletionStatus(IOPort, &value, &key, &overlapped, INFINITE)) {
         if(key == 1) {
             if(value == SERVICE_CONTROL_STOP)
@@ -146,17 +149,21 @@ restart:
                 continue;
             if(!GetExitCodeProcess(procinfo.hProcess, &code))
                 debug(L"GetExitCodeProcess failed");
-            debug(L"Main process exited, restarting");
+            debug(L"Main process exited");
             CloseHandle(procinfo.hProcess);
             CloseHandle(Job);
-            goto restart;
+            if(restartOnExit)
+                goto restart;
+            SetLastError(code);
+            goto error;
         default:
             break;
         }
     }
     debug(L"stop requested");
+    SetLastError(ERROR_SUCCESS);
 error:
-    ReportStatus(SERVICE_STOPPED);
+    ReportStatus(SERVICE_STOPPED, GetLastError());
     CloseHandle(IOPort);
     CloseHandle(Job);
 }
@@ -171,6 +178,8 @@ L"\tsrvany.exe remove service_name\n" \
 L"\t    Remove service\n\n" \
 L"\tsrvany.exe list\n" \
 L"\t    list installed srvany services\n\n" \
+L"\tFlags:\n" \
+L"\t\t/R Restart command on exit\n" \
 L"";
 
 static BOOL cmdtok(LPCWSTR *pos, LPWSTR out, int size)
@@ -314,6 +323,7 @@ void installService(LPWSTR name, LPWSTR command)
     if(!service)
         goto error;
     writeParam(name, L"Application", REG_SZ, (LPBYTE)command, wcslen(command)*sizeof(WCHAR));
+    writeParam(name, L"RestartOnExit", REG_DWORD, (LPBYTE)&restartOnExit, sizeof(restartOnExit));
     wprintf(L"Service installed successfully\n");
     return;
 
@@ -365,14 +375,14 @@ void removeService(LPWSTR name)
 {
     SC_HANDLE Manager, service = NULL;
     BYTE buf[cmdMax*sizeof(WCHAR)];
-    DWORD size = cmdMax*sizeof(WCHAR), status;
+    DWORD size = cmdMax*sizeof(WCHAR);
     if(!(Manager = OpenSCManager(NULL, NULL, 0)))
         goto error;
     if(!readParam(name, L"Application", REG_SZ, buf, &size)) {
         debug(L"Not an srvany service");
         goto done;
     }
-    if(!(service = OpenService(Manager, name, DELETE)))
+    if(!(service = OpenServiceW(Manager, name, DELETE)))
         goto error;
     if(DeleteService(service)) {
         wprintf(L"Service removed successfully\n");
@@ -385,6 +395,11 @@ done:
     CloseServiceHandle(Manager);
 }
 
+void printHelp(void)
+{
+    wprintf(L"%s\n", help_text);
+}
+
 int wmain(int argc, WCHAR *argv[])
 {
     SERVICE_TABLE_ENTRYW DispatchTable[] = {
@@ -392,45 +407,67 @@ int wmain(int argc, WCHAR *argv[])
         { NULL, NULL }
     };
     LPWSTR commandLine = GetCommandLineW();
-    LPWSTR temp;
-    LPWSTR out = (LPWSTR)LocalAlloc(0, sizeof(WCHAR)*2048);
-    if(!out) {
-        debug(L"Failed to allocate memory");
-        return;
-    }
+    WCHAR out[2048];
+    WCHAR name[256];
+    enum _mode {
+        INSTALL,
+        RUN
+    } mode;
 
-    /* Hide terminal when launched from explorer */
+    /* Hide terminal when outside of a console */
     if(!isTerminal())
         FreeConsole();
 
-    cmdtok(&commandLine, out, 2048); /* skip executable name */
-    temp = commandLine;
-    if(!cmdtok(&commandLine, out, 2048)) {
-        wprintf(L"%s\n", help_text);
+    if(argc < 2) {
+        /* if there's no arguments, attempt to run as a service */
+        /* if we're not a service, the user should see help text */
+        printHelp();
         isService = TRUE;
         goto startService;
     }
 
-    if(StrCmpIW(out, L"install") == 0) {
-        WCHAR name[256];
-        cmdtok(&commandLine, name, 256);
-        installService(name, commandLine);
-        return;
-    } else if(StrCmpIW(out, L"remove") == 0) {
-        WCHAR name[256];
-        cmdtok(&commandLine, name, 256);
-        removeService(name);
-        return;
-    } else if(StrCmpIW(out, L"list") == 0) {
-        listService();
-        return;
-    } else if(StrCmpIW(out, L"run") == 0) {
-        commandLine = out;
-    } else {
-        commandLine = temp;
+    mode = RUN;
+
+    cmdtok(&commandLine, out, 2048); /* skip executable name */
+    wcsncpy(CommandLine, commandLine, cmdMax);
+    if(cmdtok(&commandLine, out, 2048)) {
+        if(StrCmpIW(out, L"install") == 0) {
+            cmdtok(&commandLine, name, 256);
+            mode = INSTALL;
+        } else if(StrCmpIW(out, L"remove") == 0) {
+            cmdtok(&commandLine, name, 256);
+            removeService(name);
+            return;
+        } else if(StrCmpIW(out, L"list") == 0) {
+            listService();
+            return;
+        } else if(StrCmpIW(out, L"run") == 0) {
+            /* do nothing */
+        } else {
+            /* assume command */
+            goto startService;
+        }
     }
 
-    CommandLine = commandLine;
+    while(*commandLine == '/')
+    {
+        cmdtok(&commandLine, out, 2048);
+        if(StrCmpIW(out, L"/R") == 0) {
+            restartOnExit = TRUE;
+        } else {
+            wprintf(L"Unknown flag \"%s\"\n", out);
+            exit(ERROR_INVALID_PARAMETER);
+        }
+    }
+
+    wcsncpy(CommandLine, commandLine, cmdMax);
+
+    SetLastError(ERROR_SUCCESS);
+    if(mode == INSTALL)
+    {
+        installService(name, CommandLine);
+        exit(GetLastError());
+    }
 
 startService:
 
@@ -445,4 +482,6 @@ startService:
         StartServiceCtrlDispatcherW(DispatchTable);
     else
         ServiceMain(0, NULL);
+
+    exit(GetLastError());
 }
