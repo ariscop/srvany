@@ -74,7 +74,8 @@ VOID ServiceSetup(DWORD argc, LPWSTR *argv)
 VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv)
 {
     BOOL ret;
-    DWORD key, value, code;
+    ULONG_PTR key = 0;
+    DWORD value, code;
     LPOVERLAPPED overlapped;
     HANDLE Job = INVALID_HANDLE_VALUE;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limitInfo = {0};
@@ -322,7 +323,7 @@ void installService(LPWSTR name, LPWSTR command)
     );
     if(!service)
         goto error;
-    writeParam(name, L"Application", REG_SZ, (LPBYTE)command, wcslen(command)*sizeof(WCHAR));
+    writeParam(name, L"Application", REG_SZ, (LPBYTE)command, (DWORD)(wcslen(command)*sizeof(WCHAR)));
     writeParam(name, L"RestartOnExit", REG_DWORD, (LPBYTE)&restartOnExit, sizeof(restartOnExit));
     wprintf(L"Service installed successfully\n");
     return;
